@@ -11,6 +11,9 @@
 #include <QtNetwork/QHostAddress>
 #include <QtWebSockets/QWebSocket>
 
+/// Maximum Mumble message payload size in bytes (matches the TCP Connection limit).
+static constexpr int MAX_MUMBLE_MESSAGE_SIZE = 0x7fffff;
+
 WebSocketConnection::WebSocketConnection(QObject *parent, QWebSocket *socket) : QObject(parent), m_socket(socket) {
 	m_socket->setParent(this);
 	bDisconnectedEmitted = false;
@@ -40,7 +43,7 @@ void WebSocketConnection::socketBinaryMessageReceived(const QByteArray &msg) {
 		static_cast< Mumble::Protocol::TCPMessageType >(qFromBigEndian< quint16 >(&data[0]));
 	const int len = qFromBigEndian< qint32 >(&data[2]);
 
-	if (len < 0 || len > 0x7fffff) {
+	if (len < 0 || len > MAX_MUMBLE_MESSAGE_SIZE) {
 		qWarning() << "WebSocketConnection: received oversized or invalid message (len =" << len << ")";
 		disconnectSocket(true);
 		return;
@@ -74,7 +77,7 @@ void WebSocketConnection::messageToNetwork(const ::google::protobuf::Message &ms
 #else
 	const std::size_t len = static_cast< std::size_t >(msg.ByteSize());
 #endif
-	if (len > 0x7fffff)
+	if (len > MAX_MUMBLE_MESSAGE_SIZE)
 		return;
 	cache.resize(static_cast< int >(len + 6));
 	unsigned char *uc = reinterpret_cast< unsigned char * >(cache.data());
@@ -157,4 +160,8 @@ QSsl::SslProtocol WebSocketConnection::sessionProtocol() const {
 
 QString WebSocketConnection::sessionProtocolString() const {
 	return MumbleSSL::protocolToString(sessionProtocol());
+}
+
+QSslKey WebSocketConnection::ephemeralServerKey() const {
+	return m_socket->sslConfiguration().ephemeralServerKey();
 }

@@ -16,6 +16,7 @@
 #include <QtNetwork/QSslCertificate>
 #include <QtNetwork/QSslCipher>
 #include <QtNetwork/QSslError>
+#include <QtNetwork/QSslKey>
 #include <QtWebSockets/QWebSocket>
 
 #include <memory>
@@ -70,6 +71,7 @@ public:
 	QSslCipher sessionCipher() const;
 	QSsl::SslProtocol sessionProtocol() const;
 	QString sessionProtocolString() const;
+	QSslKey ephemeralServerKey() const;
 
 	std::unique_ptr< CryptState > csCrypt;
 	bool bDisconnectedEmitted;

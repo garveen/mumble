@@ -1120,11 +1120,9 @@ void ServerHandler::wsConnected() {
 		return;
 	}
 
-	// For wss://, QWebSocket performs TLS internally; check for PFS.
-	connectionUsesPerfectForwardSecrecy =
-		!wsConn->sessionCipher().isNull()
-		&& (wsConn->sessionProtocol() == QSsl::TlsV1_3 || wsConn->sessionProtocol() == QSsl::TlsV1_3OrLater
-			|| wsConn->sessionProtocol() == QSsl::TlsV1_2OrLater);
+	// For wss://, check for Perfect Forward Secrecy the same way as in TLS mode:
+	// an ephemeral server key is present when a DHE/ECDHE cipher suite was negotiated.
+	connectionUsesPerfectForwardSecrecy = !wsConn->ephemeralServerKey().isNull();
 
 	iInFlightTCPPings = 0;
 
@@ -1195,7 +1193,7 @@ void ServerHandler::setConnectionInfo(const QString &host, unsigned short port, 
 
 		// Honour any explicit port in the URL; fall back to the provided port.
 		const int urlPort = m_wsUrl.port(-1);
-		if (urlPort <= 0) {
+		if (urlPort == -1) {
 			m_wsUrl.setPort(static_cast< int >(port));
 		}
 
