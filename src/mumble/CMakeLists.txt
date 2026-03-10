@@ -28,6 +28,8 @@ option(manual-plugin "Include the built-in \"manual\" positional audio plugin." 
 
 option(qtspeech "Use Qt's text-to-speech system (part of the Qt Speech module) instead of Mumble's own OS-specific text-to-speech implementations." OFF)
 
+option(websocket "Build WebSocket (ws:// / wss://) connection support." ON)
+
 option(jackaudio "Build support for JackAudio." ON)
 option(portaudio "Build support for PortAudio" ON)
 
@@ -79,7 +81,6 @@ find_pkg(Qt6
 		Concurrent
 		Sql
 		Svg
-		WebSockets
 		Widgets
 	REQUIRED
 )
@@ -290,8 +291,6 @@ set(MUMBLE_SOURCES
 	"VolumeSliderWidgetAction.h"
 	"WebFetch.cpp"
 	"WebFetch.h"
-	"WebSocketConnection.cpp"
-	"WebSocketConnection.h"
 	"XMLTools.cpp"
 	"XMLTools.h"
 
@@ -570,9 +569,19 @@ target_link_libraries(mumble_client_object_lib
 		Qt6::Concurrent
 		Qt6::Sql
 		Qt6::Svg
-		Qt6::WebSockets
 		Qt6::Widgets
 )
+
+if(websocket)
+	find_pkg(Qt6 COMPONENTS WebSockets REQUIRED)
+	target_sources(mumble_client_object_lib
+		PRIVATE
+			"WebSocketConnection.cpp"
+			"WebSocketConnection.h"
+	)
+	target_compile_definitions(mumble_client_object_lib PUBLIC "USE_WEBSOCKET")
+	target_link_libraries(mumble_client_object_lib PUBLIC Qt6::WebSockets)
+endif()
 
 if(static)
 	if(TARGET Qt6::QSQLiteDriverPlugin)

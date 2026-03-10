@@ -36,7 +36,9 @@
 #include "MumbleProtocol.h"
 #include "ServerAddress.h"
 #include "Timer.h"
-#include "WebSocketConnection.h"
+#ifdef USE_WEBSOCKET
+#	include "WebSocketConnection.h"
+#endif
 
 #include <memory>
 
@@ -94,8 +96,10 @@ protected:
 	unsigned short usResolvedPort;
 	bool bUdp;
 	bool bStrong;
+#ifdef USE_WEBSOCKET
 	bool m_useWebSocket;
 	QUrl m_wsUrl;
+#endif
 	int connectionID;
 	Mumble::Protocol::UDPPingEncoder< Mumble::Protocol::Role::Client > m_udpPingEncoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_udpDecoder;
@@ -125,7 +129,9 @@ public:
 	QList< QSslCertificate > qscCert;
 	QSslCipher qscCipher;
 	ConnectionPtr cConnection;
+#ifdef USE_WEBSOCKET
 	WebSocketConnectionPtr m_wsConnection;
+#endif
 	QByteArray qbaDigest;
 	std::shared_ptr< VoiceRecorder > recorder;
 	QSslSocket *qtsSock;
@@ -227,7 +233,9 @@ signals:
 protected slots:
 	void message(Mumble::Protocol::TCPMessageType type, const QByteArray &);
 	void serverConnectionConnected();
+#ifdef USE_WEBSOCKET
 	void wsConnected();
+#endif
 	void serverConnectionTimeoutOnConnect();
 	void serverConnectionStateChanged(QAbstractSocket::SocketState);
 	void serverConnectionClosed(QAbstractSocket::SocketError, const QString &);

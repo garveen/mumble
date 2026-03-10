@@ -30,7 +30,9 @@
 #include "ServerResolverRecord.h"
 #include "User.h"
 #include "Utils.h"
-#include "WebSocketConnection.h"
+#ifdef USE_WEBSOCKET
+#	include "WebSocketConnection.h"
+#endif
 #include "Global.h"
 
 #include <QPainter>
@@ -38,7 +40,9 @@
 #include <QtGui/QImageReader>
 #include <QtNetwork/QSslConfiguration>
 #include <QtNetwork/QUdpSocket>
-#include <QtWebSockets/QWebSocket>
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocket>
+#endif
 
 #include <openssl/crypto.h>
 
@@ -114,12 +118,16 @@ static HANDLE loadQoS() {
 
 ServerHandler::ServerHandler() : database(new Database(QLatin1String("ServerHandler"))) {
 	cConnection.reset();
+#ifdef USE_WEBSOCKET
 	m_wsConnection.reset();
+#endif
 	qusUdp                  = nullptr;
 	bStrong                 = false;
 	usPort                  = 0;
 	bUdp                    = true;
+#ifdef USE_WEBSOCKET
 	m_useWebSocket          = false;
+#endif
 	tConnectionTimeoutTimer = nullptr;
 	m_version               = Version::UNKNOWN;
 	iInFlightTCPPings       = 0;
@@ -191,6 +199,7 @@ void ServerHandler::customEvent(QEvent *evt) {
 
 	ServerHandlerMessageEvent *shme = static_cast< ServerHandlerMessageEvent * >(evt);
 
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		WebSocketConnectionPtr wsConn(m_wsConnection);
 		if (wsConn) {
@@ -200,6 +209,7 @@ void ServerHandler::customEvent(QEvent *evt) {
 		}
 		return;
 	}
+#endif
 
 	ConnectionPtr connection(cConnection);
 	if (connection) {
@@ -367,6 +377,7 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 void ServerHandler::sendProtoMessage(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType type) {
 	QByteArray qba;
 
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		if (QThread::currentThread() != thread()) {
 			WebSocketConnection::messageToNetwork(msg, type, qba);
@@ -380,6 +391,7 @@ void ServerHandler::sendProtoMessage(const ::google::protobuf::Message &msg, Mum
 		}
 		return;
 	}
+#endif
 
 	if (QThread::currentThread() != thread()) {
 		Connection::messageToNetwork(msg, type, qba);
@@ -439,6 +451,7 @@ void ServerHandler::hostnameResolved() {
 }
 
 void ServerHandler::run() {
+#ifdef USE_WEBSOCKET
 	// --- WebSocket mode ---
 	// When the server address is a ws:// or wss:// URL, we bypass the
 	// DNS-resolve-then-TLS sequence and let QWebSocket manage the transport.
@@ -458,11 +471,11 @@ void ServerHandler::run() {
 		// For wss://, copy the Mumble client certificate into the SSL configuration.
 		if (m_wsUrl.scheme() == QLatin1String("wss")) {
 			QSslConfiguration sslConfig = ws->sslConfiguration();
-#if QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
+#	if QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
 			sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
-#else
+#	else
 			sslConfig.setProtocol(QSsl::TlsV1_0OrLater);
-#endif
+#	endif
 			if (!Global::get().s.bSuppressIdentity && CertWizard::validateCert(Global::get().s.kpCertificate)) {
 				sslConfig.setPrivateKey(Global::get().s.kpCertificate.second);
 				sslConfig.setLocalCertificate(Global::get().s.kpCertificate.first.at(0));
@@ -530,6 +543,7 @@ void ServerHandler::run() {
 		tConnectionTimeoutTimer = nullptr;
 		return;
 	}
+#endif // USE_WEBSOCKET
 
 	// --- Regular TLS mode ---
 
@@ -670,6 +684,7 @@ extern DWORD WinVerifySslCert(const QByteArray &cert);
 #endif
 
 void ServerHandler::setSslErrors(const QList< QSslError > &errors) {
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		// For WebSocket (wss://) SSL errors, check against the stored digest
 		// just like the TLS path. WebSocketConnection emits handleSslErrors
@@ -693,6 +708,7 @@ void ServerHandler::setSslErrors(const QList< QSslError > &errors) {
 		}
 		return;
 	}
+#endif
 
 	ConnectionPtr connection(cConnection);
 	if (!connection)
@@ -745,6 +761,7 @@ void ServerHandler::sendPing() {
 }
 
 void ServerHandler::sendPingInternal() {
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		WebSocketConnectionPtr wsConn(m_wsConnection);
 		if (!wsConn)
@@ -774,6 +791,7 @@ void ServerHandler::sendPingInternal() {
 		iInFlightTCPPings += 1;
 		return;
 	}
+#endif
 
 	ConnectionPtr connection(cConnection);
 	if (!connection)
@@ -865,7 +883,9 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 				   / 1000.0);
 
 			// WebSocket mode never uses UDP; skip UDP-mode switching logic.
+#ifdef USE_WEBSOCKET
 			if (!m_useWebSocket) {
+#endif
 				ConnectionPtr connection(cConnection);
 				if (!connection)
 					return;
@@ -897,7 +917,9 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 						database->setUdp(qbaDigest, true);
 					}
 				}
+#ifdef USE_WEBSOCKET
 			}
+#endif
 		}
 	} else {
 		ServerHandlerMessageEvent *shme = new ServerHandlerMessageEvent(qbaMsg, type, false);
@@ -914,6 +936,7 @@ void ServerHandler::disconnect() {
 void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, const QString &reason) {
 	changeState(ServerHandlerState::ConnectionOver);
 
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		WebSocketConnection *wsc = m_wsConnection.get();
 		if (!wsc) {
@@ -924,6 +947,7 @@ void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, con
 		}
 		wsc->bDisconnectedEmitted = true;
 	} else {
+#endif
 		Connection *c = cConnection.get();
 		if (!c) {
 			return;
@@ -932,7 +956,9 @@ void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, con
 			return;
 		}
 		c->bDisconnectedEmitted = true;
+#ifdef USE_WEBSOCKET
 	}
+#endif
 
 	AudioOutputPtr ao = Global::get().ao;
 	if (ao)
@@ -960,17 +986,21 @@ void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, con
 }
 
 void ServerHandler::serverConnectionTimeoutOnConnect() {
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		WebSocketConnectionPtr wsConn(m_wsConnection);
 		if (wsConn) {
 			wsConn->disconnectSocket(true);
 		}
 	} else {
+#endif
 		ConnectionPtr connection(cConnection);
 		if (connection) {
 			connection->disconnectSocket(true);
 		}
+#ifdef USE_WEBSOCKET
 	}
+#endif
 
 	serverConnectionClosed(QAbstractSocket::SocketTimeoutError, tr("Connection timed out"));
 }
@@ -1117,6 +1147,7 @@ void ServerHandler::serverConnectionConnected() {
 /// Called when a WebSocket connection (ws:// or wss://) is established.
 /// Mirrors the post-handshake setup from serverConnectionConnected() but
 /// adapted for the WebSocket transport.
+#ifdef USE_WEBSOCKET
 void ServerHandler::wsConnected() {
 	WebSocketConnectionPtr wsConn(m_wsConnection);
 	if (!wsConn) {
@@ -1180,17 +1211,21 @@ void ServerHandler::wsConnected() {
 
 	emit connected();
 }
+#endif // USE_WEBSOCKET
 
 CryptState *ServerHandler::getCryptState() const {
 	if (cConnection)
 		return cConnection->csCrypt.get();
+#ifdef USE_WEBSOCKET
 	if (m_wsConnection)
 		return m_wsConnection->csCrypt.get();
+#endif
 	return nullptr;
 }
 
 void ServerHandler::setConnectionInfo(const QString &host, unsigned short port, const QString &username,
 									  const QString &pw) {
+#ifdef USE_WEBSOCKET
 	// Detect WebSocket scheme (ws:// or wss://)
 	const QString schemeLower = host.toLower();
 	if (schemeLower.startsWith(QLatin1String("ws://")) || schemeLower.startsWith(QLatin1String("wss://"))) {
@@ -1211,12 +1246,17 @@ void ServerHandler::setConnectionInfo(const QString &host, unsigned short port, 
 		qsHostName     = host;
 		usPort         = port;
 	}
+#else
+	qsHostName = host;
+	usPort     = port;
+#endif
 
 	qsUserName = username;
 	qsPassword = pw;
 }
 
 void ServerHandler::getConnectionInfo(QString &host, unsigned short &port, QString &username, QString &pw) const {
+#ifdef USE_WEBSOCKET
 	// For WebSocket connections, return the full URL as the host so that
 	// favourites and auto-reconnect can restore the WebSocket scheme.
 	if (m_useWebSocket) {
@@ -1224,6 +1264,9 @@ void ServerHandler::getConnectionInfo(QString &host, unsigned short &port, QStri
 	} else {
 		host = qsHostName;
 	}
+#else
+	host = qsHostName;
+#endif
 	port     = usPort;
 	username = qsUserName;
 	pw       = qsPassword;
@@ -1491,11 +1534,15 @@ void ServerHandler::announceRecordingState(bool recording) {
 QUrl ServerHandler::getServerURL(bool withPassword) const {
 	QUrl url;
 
+#ifdef USE_WEBSOCKET
 	if (m_useWebSocket) {
 		url.setScheme(m_wsUrl.scheme());
 	} else {
 		url.setScheme(QLatin1String("mumble"));
 	}
+#else
+	url.setScheme(QLatin1String("mumble"));
+#endif
 	url.setHost(qsHostName);
 	if (usPort != DEFAULT_MUMBLE_PORT) {
 		url.setPort(usPort);
