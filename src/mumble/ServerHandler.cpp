@@ -450,7 +450,10 @@ void ServerHandler::run() {
 		bUdp       = false;
 		qtsSock    = nullptr;
 
-		QWebSocket *ws = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, nullptr);
+		// Create QWebSocket with 'this' as parent so that it is not leaked if the
+		// WebSocketConnection constructor is never reached. The WebSocketConnection
+		// constructor will re-parent the socket to itself via setParent().
+		QWebSocket *ws = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
 
 		// For wss://, copy the Mumble client certificate into the SSL configuration.
 		if (m_wsUrl.scheme() == QLatin1String("wss")) {
@@ -1140,6 +1143,9 @@ void ServerHandler::wsConnected() {
 	} else {
 		// For plain ws:// (no TLS), derive a digest from host:port so that the
 		// database key is still unique per server.
+		// NOTE: ws:// connections have no server-side certificate, so server
+		// identity cannot be verified.  Use wss:// to get TLS-level
+		// authentication and encryption.
 		const QByteArray hostPort = qsHostName.toUtf8() + ':' + QByteArray::number(usPort);
 		qbaDigest                 = QCryptographicHash::hash(hostPort, QCryptographicHash::Sha1);
 	}

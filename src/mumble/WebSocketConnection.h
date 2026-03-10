@@ -35,10 +35,10 @@ namespace protobuf {
 ///   [2-byte big-endian message type][4-byte big-endian length][payload]
 /// Each WebSocket binary message carries exactly one such frame.
 class WebSocketConnection : public QObject {
-private:
 	Q_OBJECT
 	Q_DISABLE_COPY(WebSocketConnection)
 
+private:
 	QWebSocket *m_socket;
 	QElapsedTimer m_lastPacket;
 
