@@ -657,11 +657,22 @@ QMimeData *ServerItem::toMimeData() const {
 QMimeData *ServerItem::toMimeData(const QString &name, const QString &host, unsigned short port,
 								  const QString &channel) {
 	QUrl url;
-	url.setScheme(QLatin1String("mumble"));
-	url.setHost(host);
-	if (port != DEFAULT_MUMBLE_PORT)
-		url.setPort(port);
-	url.setPath(channel);
+
+	// For WebSocket addresses (ws:// or wss://), preserve the original URL.
+	// These can't be represented as a mumble:// URL, so use the WebSocket URL directly.
+	const bool isWsUrl = host.startsWith(QLatin1String("ws://"), Qt::CaseInsensitive)
+						 || host.startsWith(QLatin1String("wss://"), Qt::CaseInsensitive);
+	if (isWsUrl) {
+		url = QUrl(host);
+		if (!channel.isEmpty())
+			url.setPath(channel);
+	} else {
+		url.setScheme(QLatin1String("mumble"));
+		url.setHost(host);
+		if (port != DEFAULT_MUMBLE_PORT)
+			url.setPort(port);
+		url.setPath(channel);
+	}
 
 	QUrlQuery query;
 	query.addQueryItem(QLatin1String("title"), name);

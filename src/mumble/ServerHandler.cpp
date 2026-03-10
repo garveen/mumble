@@ -450,7 +450,7 @@ void ServerHandler::run() {
 		bUdp       = false;
 		qtsSock    = nullptr;
 
-		QWebSocket *ws = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
+		QWebSocket *ws = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, nullptr);
 
 		// For wss://, copy the Mumble client certificate into the SSL configuration.
 		if (m_wsUrl.scheme() == QLatin1String("wss")) {
@@ -1211,7 +1211,13 @@ void ServerHandler::setConnectionInfo(const QString &host, unsigned short port, 
 }
 
 void ServerHandler::getConnectionInfo(QString &host, unsigned short &port, QString &username, QString &pw) const {
-	host     = qsHostName;
+	// For WebSocket connections, return the full URL as the host so that
+	// favourites and auto-reconnect can restore the WebSocket scheme.
+	if (m_useWebSocket) {
+		host = m_wsUrl.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery | QUrl::RemoveFragment);
+	} else {
+		host = qsHostName;
+	}
 	port     = usPort;
 	username = qsUserName;
 	pw       = qsPassword;
