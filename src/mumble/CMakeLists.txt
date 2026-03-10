@@ -79,6 +79,7 @@ find_pkg(Qt6
 		Concurrent
 		Sql
 		Svg
+		WebSockets
 		Widgets
 	REQUIRED
 )
@@ -289,6 +290,8 @@ set(MUMBLE_SOURCES
 	"VolumeSliderWidgetAction.h"
 	"WebFetch.cpp"
 	"WebFetch.h"
+	"WebSocketConnection.cpp"
+	"WebSocketConnection.h"
 	"XMLTools.cpp"
 	"XMLTools.h"
 
@@ -567,6 +570,7 @@ target_link_libraries(mumble_client_object_lib
 		Qt6::Concurrent
 		Qt6::Sql
 		Qt6::Svg
+		Qt6::WebSockets
 		Qt6::Widgets
 )
 

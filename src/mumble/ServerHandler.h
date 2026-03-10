@@ -25,6 +25,7 @@
 #include <QtCore/QStringList>
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
+#include <QtCore/QUrl>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QSslCipher>
 #include <QtNetwork/QSslError>
@@ -35,10 +36,12 @@
 #include "MumbleProtocol.h"
 #include "ServerAddress.h"
 #include "Timer.h"
+#include "WebSocketConnection.h"
 
 #include <memory>
 
 class Connection;
+class CryptState;
 class Database;
 class PacketDataStream;
 class QUdpSocket;
@@ -91,6 +94,8 @@ protected:
 	unsigned short usResolvedPort;
 	bool bUdp;
 	bool bStrong;
+	bool m_useWebSocket;
+	QUrl m_wsUrl;
 	int connectionID;
 	Mumble::Protocol::UDPPingEncoder< Mumble::Protocol::Role::Client > m_udpPingEncoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_udpDecoder;
@@ -120,6 +125,7 @@ public:
 	QList< QSslCertificate > qscCert;
 	QSslCipher qscCipher;
 	ConnectionPtr cConnection;
+	WebSocketConnectionPtr m_wsConnection;
 	QByteArray qbaDigest;
 	std::shared_ptr< VoiceRecorder > recorder;
 	QSslSocket *qtsSock;
@@ -201,6 +207,10 @@ public:
 	/// Return connection information as a URL
 	QUrl getServerURL(bool withPassword = false) const;
 
+	/// Returns the active CryptState for the current connection (TLS or WebSocket).
+	/// Returns nullptr if not connected.
+	CryptState *getCryptState() const;
+
 	void disconnect();
 	void run() Q_DECL_OVERRIDE;
 signals:
@@ -217,6 +227,7 @@ signals:
 protected slots:
 	void message(Mumble::Protocol::TCPMessageType type, const QByteArray &);
 	void serverConnectionConnected();
+	void wsConnected();
 	void serverConnectionTimeoutOnConnect();
 	void serverConnectionStateChanged(QAbstractSocket::SocketState);
 	void serverConnectionClosed(QAbstractSocket::SocketError, const QString &);
