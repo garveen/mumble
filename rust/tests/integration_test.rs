@@ -117,6 +117,7 @@ async fn handle_connection(
     write_frame(&mut buf, &encoded).await?;
 
     // — Send CodecVersion —
+    // alpha = -2147483637 is the CELT 0.11.0 bitstream version constant used by Mumble.
     let codec = mumble_proto::CodecVersion {
         alpha: -2147483637,
         beta: 0,

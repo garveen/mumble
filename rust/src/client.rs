@@ -16,13 +16,14 @@ use crate::error::{MumbleError, Result};
 use crate::mumble_proto;
 use crate::proto::{read_frame, write_frame, Frame, MessageType};
 
+/// Client type sent in the `Authenticate` message.
+const CLIENT_TYPE_BOT: i32 = 1;
+
 /// The default Mumble server TCP port.
 pub const DEFAULT_PORT: u16 = 64738;
 
 /// Keepalive ping interval (Mumble servers disconnect after 30 s without a ping).
 const PING_INTERVAL: Duration = Duration::from_secs(15);
-
-/// Configuration for connecting to a Mumble server.
 ///
 /// See `docs/config_guide.md` for a complete description of every field.
 #[derive(Debug, Clone)]
@@ -274,7 +275,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> MumbleClient<S> {
             version_v2: Some(make_version_v2(1, 5, 0, 0)),
             release: Some("mumble-rust-client/0.1.0".into()),
             os: Some(std::env::consts::OS.into()),
-            os_version: Some("unknown".into()),
+            os_version: Some(std::env::consts::ARCH.into()),
         };
         self.send(MessageType::Version, &version).await?;
 
@@ -284,7 +285,7 @@ impl<S: AsyncRead + AsyncWrite + Unpin> MumbleClient<S> {
             password: config.password.clone(),
             tokens: config.tokens.clone(),
             opus: Some(true),
-            client_type: Some(1), // BOT
+            client_type: Some(CLIENT_TYPE_BOT),
             ..Default::default()
         };
         self.send(MessageType::Authenticate, &auth).await?;
