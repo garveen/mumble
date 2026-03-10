@@ -30,6 +30,7 @@
 #include "ServerResolverRecord.h"
 #include "User.h"
 #include "Utils.h"
+#include "WebSocketConnection.h"
 #include "Global.h"
 
 #include <QPainter>
@@ -37,6 +38,7 @@
 #include <QtGui/QImageReader>
 #include <QtNetwork/QSslConfiguration>
 #include <QtNetwork/QUdpSocket>
+#include <QtWebSockets/QWebSocket>
 
 #include <openssl/crypto.h>
 
@@ -112,10 +114,12 @@ static HANDLE loadQoS() {
 
 ServerHandler::ServerHandler() : database(new Database(QLatin1String("ServerHandler"))) {
 	cConnection.reset();
+	m_wsConnection.reset();
 	qusUdp                  = nullptr;
 	bStrong                 = false;
 	usPort                  = 0;
 	bUdp                    = true;
+	m_useWebSocket          = false;
 	tConnectionTimeoutTimer = nullptr;
 	m_version               = Version::UNKNOWN;
 	iInFlightTCPPings       = 0;
@@ -186,6 +190,16 @@ void ServerHandler::customEvent(QEvent *evt) {
 	}
 
 	ServerHandlerMessageEvent *shme = static_cast< ServerHandlerMessageEvent * >(evt);
+
+	if (m_useWebSocket) {
+		WebSocketConnectionPtr wsConn(m_wsConnection);
+		if (wsConn) {
+			if (shme->qbaMsg.size() > 0) {
+				wsConn->sendMessage(shme->qbaMsg);
+			}
+		}
+		return;
+	}
 
 	ConnectionPtr connection(cConnection);
 	if (connection) {
@@ -353,6 +367,20 @@ void ServerHandler::sendMessage(const unsigned char *data, int len, bool force) 
 void ServerHandler::sendProtoMessage(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType type) {
 	QByteArray qba;
 
+	if (m_useWebSocket) {
+		if (QThread::currentThread() != thread()) {
+			WebSocketConnection::messageToNetwork(msg, type, qba);
+			ServerHandlerMessageEvent *shme = new ServerHandlerMessageEvent(qba, type, false);
+			QApplication::postEvent(this, shme);
+		} else {
+			WebSocketConnectionPtr wsConn(m_wsConnection);
+			if (!wsConn)
+				return;
+			wsConn->sendMessage(msg, type, qba);
+		}
+		return;
+	}
+
 	if (QThread::currentThread() != thread()) {
 		Connection::messageToNetwork(msg, type, qba);
 		ServerHandlerMessageEvent *shme = new ServerHandlerMessageEvent(qba, type, false);
@@ -411,6 +439,97 @@ void ServerHandler::hostnameResolved() {
 }
 
 void ServerHandler::run() {
+	// --- WebSocket mode ---
+	// When the server address is a ws:// or wss:// URL, we bypass the
+	// DNS-resolve-then-TLS sequence and let QWebSocket manage the transport.
+	if (m_useWebSocket) {
+		changeState(ServerHandlerState::DNSResolved);
+
+		qbaDigest  = QByteArray();
+		bStrong    = true;
+		bUdp       = false;
+		qtsSock    = nullptr;
+
+		QWebSocket *ws = new QWebSocket(QString(), QWebSocketProtocol::VersionLatest, this);
+
+		// For wss://, copy the Mumble client certificate into the SSL configuration.
+		if (m_wsUrl.scheme() == QLatin1String("wss")) {
+			QSslConfiguration sslConfig = ws->sslConfiguration();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 3, 0)
+			sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+#else
+			sslConfig.setProtocol(QSsl::TlsV1_0OrLater);
+#endif
+			if (!Global::get().s.bSuppressIdentity && CertWizard::validateCert(Global::get().s.kpCertificate)) {
+				sslConfig.setPrivateKey(Global::get().s.kpCertificate.second);
+				sslConfig.setLocalCertificate(Global::get().s.kpCertificate.first.at(0));
+				QList< QSslCertificate > certs = sslConfig.caCertificates();
+				certs << Global::get().s.kpCertificate.first;
+				sslConfig.setCaCertificates(certs);
+			}
+			ws->setSslConfiguration(sslConfig);
+		}
+
+		{
+			WebSocketConnectionPtr wsConn(new WebSocketConnection(this, ws));
+			m_wsConnection = wsConn;
+
+			serverSynchronized = false;
+			qlErrors.clear();
+			qscCert.clear();
+
+			QObject::connect(ws, &QWebSocket::connected, this, &ServerHandler::wsConnected);
+			QObject::connect(wsConn.get(), &WebSocketConnection::connectionClosed, this,
+							 &ServerHandler::serverConnectionClosed);
+			QObject::connect(wsConn.get(), &WebSocketConnection::message, this, &ServerHandler::message);
+			QObject::connect(wsConn.get(), &WebSocketConnection::handleSslErrors, this, &ServerHandler::setSslErrors);
+		}
+
+		// Start connection-timeout timer before opening the socket.
+		tConnectionTimeoutTimer = new QTimer(this);
+		QObject::connect(tConnectionTimeoutTimer, &QTimer::timeout, this,
+						 &ServerHandler::serverConnectionTimeoutOnConnect);
+		tConnectionTimeoutTimer->setSingleShot(true);
+		tConnectionTimeoutTimer->start(Global::get().s.iConnectionTimeoutDurationMsec);
+
+		ws->open(m_wsUrl);
+
+		tTimestamp.restart();
+
+		QTimer *ticker = new QTimer(this);
+		QObject::connect(ticker, &QTimer::timeout, this, &ServerHandler::sendPing);
+		ticker->start(Global::get().s.iPingIntervalMsec);
+
+		Global::get().mw->rtLast = MumbleProto::Reject_RejectType_None;
+
+		accUDP = accTCP = accClean;
+
+		m_version   = Version::UNKNOWN;
+		qsRelease   = QString();
+		qsOS        = QString();
+		qsOSVersion = QString();
+
+		changeState(ServerHandlerState::AwaitingConnection);
+		exec();
+		changeState(ServerHandlerState::Disconnecting);
+
+		ticker->stop();
+
+		WebSocketConnectionPtr wsConnPtr(m_wsConnection);
+		if (wsConnPtr) {
+			wsConnPtr->disconnectSocket(true);
+		}
+		m_wsConnection.reset();
+		while (wsConnPtr.use_count() > 1) {
+			msleep(100);
+		}
+		delete tConnectionTimeoutTimer;
+		tConnectionTimeoutTimer = nullptr;
+		return;
+	}
+
+	// --- Regular TLS mode ---
+
 	// Resolve the hostname...
 
 	changeState(ServerHandlerState::DNSQuery);
@@ -548,6 +667,30 @@ extern DWORD WinVerifySslCert(const QByteArray &cert);
 #endif
 
 void ServerHandler::setSslErrors(const QList< QSslError > &errors) {
+	if (m_useWebSocket) {
+		// For WebSocket (wss://) SSL errors, check against the stored digest
+		// just like the TLS path. WebSocketConnection emits handleSslErrors
+		// which calls this slot. There is no proceedAnyway() on QWebSocket,
+		// so we store errors and let the existing UI flow handle them.
+		WebSocketConnectionPtr wsConn(m_wsConnection);
+		if (!wsConn)
+			return;
+
+		qscCert                      = wsConn->peerCertificateChain();
+		QList< QSslError > newErrors = errors;
+
+		bStrong = false;
+		if ((qscCert.size() > 0)
+			&& (QString::fromLatin1(qscCert.at(0).digest(QCryptographicHash::Sha1).toHex())
+				== database->getDigest(qsHostName, usPort))) {
+			// Known server - instruct the WebSocket to continue despite the errors.
+			wsConn->proceedAnyway();
+		} else {
+			qlErrors = newErrors;
+		}
+		return;
+	}
+
 	ConnectionPtr connection(cConnection);
 	if (!connection)
 		return;
@@ -599,6 +742,36 @@ void ServerHandler::sendPing() {
 }
 
 void ServerHandler::sendPingInternal() {
+	if (m_useWebSocket) {
+		WebSocketConnectionPtr wsConn(m_wsConnection);
+		if (!wsConn)
+			return;
+
+		if (Global::get().s.iMaxInFlightTCPPings > 0 && iInFlightTCPPings >= Global::get().s.iMaxInFlightTCPPings) {
+			serverConnectionClosed(QAbstractSocket::UnknownSocketError, tr("Server is not responding to TCP pings"));
+			return;
+		}
+
+		quint64 t = static_cast< quint64 >(tTimestamp.elapsed().count());
+
+		MumbleProto::Ping mpp;
+		mpp.set_timestamp(t);
+		mpp.set_good(wsConn->csCrypt->m_statsLocal.good);
+		mpp.set_late(wsConn->csCrypt->m_statsLocal.late);
+		mpp.set_lost(wsConn->csCrypt->m_statsLocal.lost);
+		mpp.set_resync(wsConn->csCrypt->m_statsLocal.resync);
+
+		if (boost::accumulators::count(accTCP)) {
+			mpp.set_tcp_ping_avg(static_cast< float >(boost::accumulators::mean(accTCP)));
+			mpp.set_tcp_ping_var(static_cast< float >(boost::accumulators::variance(accTCP)));
+		}
+		mpp.set_tcp_packets(static_cast< unsigned int >(boost::accumulators::count(accTCP)));
+
+		sendMessage(mpp);
+		iInFlightTCPPings += 1;
+		return;
+	}
+
 	ConnectionPtr connection(cConnection);
 	if (!connection)
 		return;
@@ -672,8 +845,8 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 	} else if (type == Mumble::Protocol::TCPMessageType::Ping) {
 		MumbleProto::Ping msg;
 		if (msg.ParseFromArray(qbaMsg.constData(), static_cast< int >(qbaMsg.size()))) {
-			ConnectionPtr connection(cConnection);
-			if (!connection)
+			CryptState *crypt = getCryptState();
+			if (!crypt)
 				return;
 
 			// Reset in-flight TCP ping counter to 0.
@@ -681,37 +854,45 @@ void ServerHandler::message(Mumble::Protocol::TCPMessageType type, const QByteAr
 			// connection is still OK.
 			iInFlightTCPPings = 0;
 
-			connection->csCrypt->m_statsRemote.good   = msg.good();
-			connection->csCrypt->m_statsRemote.late   = msg.late();
-			connection->csCrypt->m_statsRemote.lost   = msg.lost();
-			connection->csCrypt->m_statsRemote.resync = msg.resync();
+			crypt->m_statsRemote.good   = msg.good();
+			crypt->m_statsRemote.late   = msg.late();
+			crypt->m_statsRemote.lost   = msg.lost();
+			crypt->m_statsRemote.resync = msg.resync();
 			accTCP(static_cast< double >(static_cast< std::uint64_t >(tTimestamp.elapsed().count()) - msg.timestamp())
 				   / 1000.0);
 
-			if (((connection->csCrypt->m_statsRemote.good == 0) || (connection->csCrypt->m_statsLocal.good == 0))
-				&& bUdp && (tTimestamp.elapsed() > std::chrono::seconds(20))) {
-				bUdp = false;
-				if (!NetworkConfig::TcpModeEnabled()) {
-					if ((connection->csCrypt->m_statsRemote.good == 0) && (connection->csCrypt->m_statsLocal.good == 0))
-						Global::get().mw->msgBox(
-							tr("UDP packets cannot be sent to or received from the server. Switching to TCP mode."));
-					else if (connection->csCrypt->m_statsRemote.good == 0)
-						Global::get().mw->msgBox(
-							tr("UDP packets cannot be sent to the server. Switching to TCP mode."));
-					else
-						Global::get().mw->msgBox(
-							tr("UDP packets cannot be received from the server. Switching to TCP mode."));
+			// WebSocket mode never uses UDP; skip UDP-mode switching logic.
+			if (!m_useWebSocket) {
+				ConnectionPtr connection(cConnection);
+				if (!connection)
+					return;
 
-					database->setUdp(qbaDigest, false);
-				}
-			} else if (!bUdp && (connection->csCrypt->m_statsRemote.good > 3)
-					   && (connection->csCrypt->m_statsLocal.good > 3)) {
-				bUdp = true;
-				if (!NetworkConfig::TcpModeEnabled()) {
-					Global::get().mw->msgBox(
-						tr("UDP packets can be sent to and received from the server. Switching back to UDP mode."));
+				if (((crypt->m_statsRemote.good == 0) || (crypt->m_statsLocal.good == 0)) && bUdp
+					&& (tTimestamp.elapsed() > std::chrono::seconds(20))) {
+					bUdp = false;
+					if (!NetworkConfig::TcpModeEnabled()) {
+						if ((crypt->m_statsRemote.good == 0) && (crypt->m_statsLocal.good == 0))
+							Global::get().mw->msgBox(
+								tr("UDP packets cannot be sent to or received from the server. Switching to TCP "
+								   "mode."));
+						else if (crypt->m_statsRemote.good == 0)
+							Global::get().mw->msgBox(
+								tr("UDP packets cannot be sent to the server. Switching to TCP mode."));
+						else
+							Global::get().mw->msgBox(
+								tr("UDP packets cannot be received from the server. Switching to TCP mode."));
 
-					database->setUdp(qbaDigest, true);
+						database->setUdp(qbaDigest, false);
+					}
+				} else if (!bUdp && (crypt->m_statsRemote.good > 3) && (crypt->m_statsLocal.good > 3)) {
+					bUdp = true;
+					if (!NetworkConfig::TcpModeEnabled()) {
+						Global::get().mw->msgBox(
+							tr("UDP packets can be sent to and received from the server. Switching back to UDP "
+							   "mode."));
+
+						database->setUdp(qbaDigest, true);
+					}
 				}
 			}
 		}
@@ -730,16 +911,25 @@ void ServerHandler::disconnect() {
 void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, const QString &reason) {
 	changeState(ServerHandlerState::ConnectionOver);
 
-	Connection *c = cConnection.get();
-	if (!c) {
-		return;
+	if (m_useWebSocket) {
+		WebSocketConnection *wsc = m_wsConnection.get();
+		if (!wsc) {
+			return;
+		}
+		if (wsc->bDisconnectedEmitted) {
+			return;
+		}
+		wsc->bDisconnectedEmitted = true;
+	} else {
+		Connection *c = cConnection.get();
+		if (!c) {
+			return;
+		}
+		if (c->bDisconnectedEmitted) {
+			return;
+		}
+		c->bDisconnectedEmitted = true;
 	}
-
-	if (c->bDisconnectedEmitted) {
-		return;
-	}
-
-	c->bDisconnectedEmitted = true;
 
 	AudioOutputPtr ao = Global::get().ao;
 	if (ao)
@@ -767,9 +957,16 @@ void ServerHandler::serverConnectionClosed(QAbstractSocket::SocketError err, con
 }
 
 void ServerHandler::serverConnectionTimeoutOnConnect() {
-	ConnectionPtr connection(cConnection);
-	if (connection) {
-		connection->disconnectSocket(true);
+	if (m_useWebSocket) {
+		WebSocketConnectionPtr wsConn(m_wsConnection);
+		if (wsConn) {
+			wsConn->disconnectSocket(true);
+		}
+	} else {
+		ConnectionPtr connection(cConnection);
+		if (connection) {
+			connection->disconnectSocket(true);
+		}
 	}
 
 	serverConnectionClosed(QAbstractSocket::SocketTimeoutError, tr("Connection timed out"));
@@ -914,10 +1111,103 @@ void ServerHandler::serverConnectionConnected() {
 	emit connected();
 }
 
+/// Called when a WebSocket connection (ws:// or wss://) is established.
+/// Mirrors the post-handshake setup from serverConnectionConnected() but
+/// adapted for the WebSocket transport.
+void ServerHandler::wsConnected() {
+	WebSocketConnectionPtr wsConn(m_wsConnection);
+	if (!wsConn) {
+		return;
+	}
+
+	// For wss://, QWebSocket performs TLS internally; check for PFS.
+	connectionUsesPerfectForwardSecrecy =
+		!wsConn->sessionCipher().isNull()
+		&& (wsConn->sessionProtocol() == QSsl::TlsV1_3 || wsConn->sessionProtocol() == QSsl::TlsV1_3OrLater
+			|| wsConn->sessionProtocol() == QSsl::TlsV1_2OrLater);
+
+	iInFlightTCPPings = 0;
+
+	if (tConnectionTimeoutTimer) {
+		tConnectionTimeoutTimer->stop();
+	}
+
+	qscCert   = wsConn->peerCertificateChain();
+	qscCipher = wsConn->sessionCipher();
+
+	if (!qscCert.isEmpty()) {
+		// Use the server certificate fingerprint as the server digest, same as TLS mode.
+		const QSslCertificate &qsc = qscCert.first();
+		qbaDigest                  = sha1(qsc.publicKey().toDer());
+	} else {
+		// For plain ws:// (no TLS), derive a digest from host:port so that the
+		// database key is still unique per server.
+		const QByteArray hostPort = qsHostName.toUtf8() + ':' + QByteArray::number(usPort);
+		qbaDigest                 = QCryptographicHash::hash(hostPort, QCryptographicHash::Sha1);
+	}
+
+	// WebSocket connections always use TCP tunnel; UDP is disabled.
+	bUdp = false;
+
+	changeState(ServerHandlerState::ConnectionEstablished);
+
+	MumbleProto::Version mpv;
+	mpv.set_release(u8(Version::getRelease()));
+	MumbleProto::setVersion(mpv, Version::get());
+
+	if (!Global::get().s.bHideOS) {
+		mpv.set_os(u8(OSInfo::getOS()));
+		mpv.set_os_version(u8(OSInfo::getOSDisplayableVersion()));
+	}
+
+	sendMessage(mpv);
+
+	MumbleProto::Authenticate mpa;
+	mpa.set_username(u8(qsUserName));
+	mpa.set_password(u8(qsPassword));
+
+	QStringList tokens = database->getTokens(qbaDigest);
+	for (const QString &qs : tokens) {
+		mpa.add_tokens(u8(qs));
+	}
+
+	mpa.set_opus(true);
+	sendMessage(mpa);
+
+	emit connected();
+}
+
+CryptState *ServerHandler::getCryptState() const {
+	if (cConnection)
+		return cConnection->csCrypt.get();
+	if (m_wsConnection)
+		return m_wsConnection->csCrypt.get();
+	return nullptr;
+}
+
 void ServerHandler::setConnectionInfo(const QString &host, unsigned short port, const QString &username,
 									  const QString &pw) {
-	qsHostName = host;
-	usPort     = port;
+	// Detect WebSocket scheme (ws:// or wss://)
+	const QString schemeLower = host.toLower();
+	if (schemeLower.startsWith(QLatin1String("ws://")) || schemeLower.startsWith(QLatin1String("wss://"))) {
+		m_useWebSocket = true;
+		m_wsUrl        = QUrl(host);
+
+		// Honour any explicit port in the URL; fall back to the provided port.
+		const int urlPort = m_wsUrl.port(-1);
+		if (urlPort <= 0) {
+			m_wsUrl.setPort(static_cast< int >(port));
+		}
+
+		qsHostName = m_wsUrl.host();
+		usPort     = static_cast< unsigned short >(m_wsUrl.port(static_cast< int >(port)));
+	} else {
+		m_useWebSocket = false;
+		m_wsUrl        = QUrl();
+		qsHostName     = host;
+		usPort         = port;
+	}
+
 	qsUserName = username;
 	qsPassword = pw;
 }
@@ -1191,7 +1481,11 @@ void ServerHandler::announceRecordingState(bool recording) {
 QUrl ServerHandler::getServerURL(bool withPassword) const {
 	QUrl url;
 
-	url.setScheme(QLatin1String("mumble"));
+	if (m_useWebSocket) {
+		url.setScheme(m_wsUrl.scheme());
+	} else {
+		url.setScheme(QLatin1String("mumble"));
+	}
 	url.setHost(qsHostName);
 	if (usPort != DEFAULT_MUMBLE_PORT) {
 		url.setPort(usPort);

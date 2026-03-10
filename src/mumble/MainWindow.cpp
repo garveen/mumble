@@ -4006,7 +4006,12 @@ void MainWindow::openServerConnectDialog(bool autoconnect) {
 	ConnectDialog *cd = new ConnectDialog(this, autoconnect);
 	int res           = cd->exec();
 
-	if (cd->qsServer.isEmpty() || (cd->usPort == 0) || cd->qsUsername.isEmpty())
+	// For WebSocket addresses (ws:// or wss://), the port may be embedded in the
+	// URL; allow usPort == 0 in that case.
+	const bool isWsServer =
+		cd->qsServer.startsWith(QLatin1String("ws://"), Qt::CaseInsensitive)
+		|| cd->qsServer.startsWith(QLatin1String("wss://"), Qt::CaseInsensitive);
+	if (cd->qsServer.isEmpty() || (!isWsServer && cd->usPort == 0) || cd->qsUsername.isEmpty())
 		res = QDialog::Rejected;
 
 	if (res == QDialog::Accepted) {

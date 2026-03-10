@@ -927,7 +927,10 @@ void ConnectDialogEdit::validate() {
 		adjustSize();
 	}
 
-	bOk = !qsHostname.isEmpty() && !qsUsername.isEmpty() && usPort;
+	bOk = !qsHostname.isEmpty() && !qsUsername.isEmpty()
+		  && (usPort
+			  || qsHostname.startsWith(QLatin1String("ws://"), Qt::CaseInsensitive)
+			  || qsHostname.startsWith(QLatin1String("wss://"), Qt::CaseInsensitive));
 	qdbbButtonBox->button(QDialogButtonBox::Ok)->setEnabled(bOk);
 }
 
@@ -938,14 +941,27 @@ void ConnectDialogEdit::accept() {
 
 		// If the user accidentally added a schema or path part, drop it now.
 		// We can't do so during editing as that is quite jarring.
+		// Exception: ws:// and wss:// schemes are intentional WebSocket addresses.
 		const auto schemaPos = server.indexOf(QLatin1String("://"));
-		if (schemaPos != -1) {
+		const bool isWsUrl   = server.startsWith(QLatin1String("ws://"), Qt::CaseInsensitive)
+							 || server.startsWith(QLatin1String("wss://"), Qt::CaseInsensitive);
+		if (schemaPos != -1 && !isWsUrl) {
 			server.remove(0, schemaPos + 3);
 		}
 
-		const auto pathPos = server.indexOf(QLatin1Char('/'));
-		if (pathPos != -1) {
-			server.resize(pathPos);
+		if (isWsUrl) {
+			// For WebSocket URLs, strip any path component using QUrl to avoid
+			// accidentally removing the '//' from the scheme separator.
+			QUrl wsUrl(server);
+			wsUrl.setPath(QString());
+			wsUrl.setQuery(QString());
+			wsUrl.setFragment(QString());
+			server = wsUrl.toString();
+		} else {
+			const auto pathPos = server.indexOf(QLatin1Char('/'));
+			if (pathPos != -1) {
+				server.resize(pathPos);
+			}
 		}
 
 		qleServer->setText(server);
@@ -1145,7 +1161,13 @@ ConnectDialog::~ConnectDialog() {
 
 void ConnectDialog::accept() {
 	ServerItem *si = static_cast< ServerItem * >(qtwServers->currentItem());
-	if (!si || (bAllowHostLookup && si->qlAddresses.isEmpty()) || si->qsHostname.isEmpty()) {
+
+	// WebSocket addresses (ws:// or wss://) bypass DNS resolution, so allow
+	// qlAddresses to be empty for them.
+	const bool isWsServer = si && (si->qsHostname.startsWith(QLatin1String("ws://"), Qt::CaseInsensitive)
+								   || si->qsHostname.startsWith(QLatin1String("wss://"), Qt::CaseInsensitive));
+
+	if (!si || (bAllowHostLookup && si->qlAddresses.isEmpty() && !isWsServer) || si->qsHostname.isEmpty()) {
 		qWarning() << "Invalid server";
 		return;
 	}
