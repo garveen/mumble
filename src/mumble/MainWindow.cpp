@@ -1289,10 +1289,49 @@ void MainWindow::openUrl(const QUrl &url) {
 		return;
 	}
 
-	if (url.scheme() != QLatin1String("mumble")) {
+	if (url.scheme() != QLatin1String("mumble")
+#ifdef USE_WEBSOCKET
+		&& url.scheme() != QLatin1String("ws") && url.scheme() != QLatin1String("wss")
+#endif
+	) {
 		Global::get().l->log(Log::Warning, tr("URL scheme is not 'mumble'"));
 		return;
 	}
+
+#ifdef USE_WEBSOCKET
+	// For WebSocket URLs, skip version negotiation and connect directly.
+	if (url.scheme() == QLatin1String("ws") || url.scheme() == QLatin1String("wss")) {
+		QString host     = url.host();
+		unsigned short port = static_cast< unsigned short >(url.port(DEFAULT_MUMBLE_PORT));
+		QString user     = url.userName();
+		QString pw       = url.password();
+
+		if (user.isEmpty()) {
+			bool ok;
+			user = QInputDialog::getText(this, tr("Connecting to %1").arg(url.toString()), tr("Enter username"),
+										 QLineEdit::Normal, Global::get().s.qsUsername, &ok);
+			if (!ok || user.isEmpty())
+				return;
+			Global::get().s.qsUsername = user;
+		}
+
+		recreateServerHandler();
+		rtLast       = MumbleProto::Reject_RejectType_None;
+		bRetryServer = true;
+		qaServerDisconnect->setEnabled(true);
+		Global::get().l->log(Log::Information,
+							 tr("Connecting to server %1.").arg(Log::msgColor(host.toHtmlEscaped(), Log::Server)));
+
+		QUrl wsUrl;
+		wsUrl.setScheme(url.scheme());
+		wsUrl.setHost(host);
+		wsUrl.setPort(port);
+		wsUrl.setPath(QLatin1String("/"));
+		Global::get().sh->setWebSocketConnectionInfo(wsUrl, user, pw);
+		Global::get().sh->start(QThread::TimeCriticalPriority);
+		return;
+	}
+#endif
 
 	Version::full_t thisVersion   = Version::get();
 	Version::full_t targetVersion = Version::UNKNOWN;
@@ -4035,7 +4074,21 @@ void MainWindow::openServerConnectDialog(bool autoconnect) {
 		Global::get().l->log(
 			Log::Information,
 			tr("Connecting to server %1.").arg(Log::msgColor(cd->qsServer.toHtmlEscaped(), Log::Server)));
-		Global::get().sh->setConnectionInfo(cd->qsServer, cd->usPort, cd->qsUsername, cd->qsPassword);
+
+#ifdef USE_WEBSOCKET
+		if (cd->qsScheme == QLatin1String("ws") || cd->qsScheme == QLatin1String("wss")) {
+			QUrl wsUrl;
+			wsUrl.setScheme(cd->qsScheme);
+			wsUrl.setHost(cd->qsServer);
+			wsUrl.setPort(cd->usPort);
+			wsUrl.setPath(QLatin1String("/"));
+			Global::get().sh->setWebSocketConnectionInfo(wsUrl, cd->qsUsername, cd->qsPassword);
+		} else {
+#endif
+			Global::get().sh->setConnectionInfo(cd->qsServer, cd->usPort, cd->qsUsername, cd->qsPassword);
+#ifdef USE_WEBSOCKET
+		}
+#endif
 		Global::get().sh->start(QThread::TimeCriticalPriority);
 	}
 	delete cd;

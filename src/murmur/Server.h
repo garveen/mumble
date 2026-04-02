@@ -46,6 +46,10 @@
 #	include <QtNetwork/QSslDiffieHellmanParameters>
 #endif
 
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocketServer>
+#endif
+
 #ifdef Q_OS_WIN
 #	include <winsock2.h>
 #endif
@@ -82,6 +86,17 @@ public:
 	SslServer(QObject *parent = nullptr);
 };
 
+#ifdef USE_WEBSOCKET
+class WsServer : public QWebSocketServer {
+private:
+	Q_OBJECT
+	Q_DISABLE_COPY(WsServer)
+
+public:
+	WsServer(const QString &serverName, QWebSocketServer::SslMode secureMode, QObject *parent = nullptr);
+};
+#endif // USE_WEBSOCKET
+
 #define EXEC_QEVENT (QEvent::User + 959)
 
 class ExecEvent : public QEvent {
@@ -116,6 +131,10 @@ protected:
 public:
 	QList< QHostAddress > qlBind;
 	unsigned short usPort;
+#ifdef USE_WEBSOCKET
+	/// Port on which to listen for WebSocket connections. 0 means disabled.
+	unsigned short usWebSocketPort;
+#endif
 	int iTimeout;
 	int iMaxBandwidth;
 	unsigned int iMaxUsers;
@@ -237,6 +256,9 @@ public:
 
 public slots:
 	void newClient();
+#ifdef USE_WEBSOCKET
+	void newWsClient();
+#endif
 	void connectionClosed(QAbstractSocket::SocketError, const QString &);
 	void sslError(const QList< QSslError > &);
 	void message(Mumble::Protocol::TCPMessageType, const QByteArray &, ServerUser *cCon = nullptr);
@@ -253,6 +275,9 @@ public:
 	unsigned int iServerNum;
 	QQueue< unsigned int > qqIds;
 	QList< SslServer * > qlServer;
+#ifdef USE_WEBSOCKET
+	QList< WsServer * > qlWsServer;
+#endif
 	QTimer *qtTimeout;
 
 #ifdef Q_OS_UNIX

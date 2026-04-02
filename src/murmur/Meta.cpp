@@ -59,6 +59,9 @@ HANDLE Meta::hQoS = nullptr;
 MetaParams::MetaParams() {
 	qsPassword = QString();
 	usPort     = DEFAULT_MUMBLE_PORT;
+#ifdef USE_WEBSOCKET
+	usWebSocketPort = 0; // Disabled by default
+#endif
 	iTimeout   = 30;
 	// This represents the maximum possible bandwidth using 10 ms audio TCP packets with position data
 	// (restricted by the maximum bitrate Opus supports)
@@ -278,6 +281,10 @@ void MetaParams::read(QString fname) {
 
 	qsPassword            = typeCheckedFromSettings("serverpassword", qsPassword);
 	usPort                = static_cast< unsigned short >(typeCheckedFromSettings("port", static_cast< uint >(usPort)));
+#ifdef USE_WEBSOCKET
+	usWebSocketPort = static_cast< unsigned short >(
+		typeCheckedFromSettings("wsport", static_cast< uint >(usWebSocketPort)));
+#endif
 	iTimeout              = typeCheckedFromSettings("timeout", iTimeout);
 	iMaxTextMessageLength = typeCheckedFromSettings("textmessagelength", iMaxTextMessageLength);
 	iMaxImageMessageLength     = typeCheckedFromSettings("imagemessagelength", iMaxImageMessageLength);

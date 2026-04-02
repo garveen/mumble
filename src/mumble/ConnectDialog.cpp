@@ -410,11 +410,20 @@ ServerItem *ServerItem::fromMimeData(const QMimeData *mime, bool default_name, Q
 		url.setScheme(QLatin1String("mumble"));
 	}
 
+	const QString scheme = url.scheme();
+	if (scheme != QLatin1String("mumble") && scheme != QLatin1String("ws") && scheme != QLatin1String("wss")) {
+		return nullptr;
+	}
+
 	return fromUrl(url, p);
 }
 
 ServerItem *ServerItem::fromUrl(QUrl url, QWidget *p) {
-	if (!url.isValid() || (url.scheme() != QLatin1String("mumble"))) {
+	const QString scheme = url.scheme();
+	bool isMumble        = (scheme == QLatin1String("mumble"));
+	bool isWs            = (scheme == QLatin1String("ws") || scheme == QLatin1String("wss"));
+
+	if (!url.isValid() || (!isMumble && !isWs)) {
 		return nullptr;
 	}
 
@@ -436,9 +445,11 @@ ServerItem *ServerItem::fromUrl(QUrl url, QWidget *p) {
 		url.setUserName(Global::get().s.qsUsername);
 	}
 
+	unsigned short defaultPort = DEFAULT_MUMBLE_PORT;
 	ServerItem *si =
 		new ServerItem(query.queryItemValue(QLatin1String("title")), url.host(),
-					   static_cast< unsigned short >(url.port(DEFAULT_MUMBLE_PORT)), url.userName(), url.password());
+					   static_cast< unsigned short >(url.port(defaultPort)), url.userName(), url.password());
+	si->qsScheme = scheme;
 
 	if (query.hasQueryItem(QLatin1String("url")))
 		si->qsUrl = query.queryItemValue(QLatin1String("url"));
@@ -1152,6 +1163,7 @@ void ConnectDialog::accept() {
 
 	qsPassword = si->qsPassword;
 	qsServer   = si->qsHostname;
+	qsScheme   = si->qsScheme.isEmpty() ? QLatin1String("mumble") : si->qsScheme;
 	usPort     = si->usPort;
 
 	if (si->qsUsername.isEmpty()) {
