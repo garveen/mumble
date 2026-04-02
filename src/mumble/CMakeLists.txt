@@ -74,6 +74,8 @@ if(MSVC)
 	option(elevation "Set \"uiAccess=true\", required for global shortcuts to work with privileged applications. Requires the client's executable to be signed with a trusted code signing certificate." OFF)
 endif()
 
+option(websocket "Build WebSocket support." ON)
+
 find_pkg(Qt6
 	COMPONENTS
 		Concurrent
@@ -357,6 +359,17 @@ list(APPEND MUMBLE_SOURCES "${CMAKE_BINARY_DIR}/mumble_flags.qrc")
 
 add_library(mumble_client_object_lib OBJECT ${MUMBLE_SOURCES})
 target_link_libraries(mumble_client_object_lib PUBLIC smallft)
+
+if(websocket)
+	find_pkg(Qt6 COMPONENTS WebSockets REQUIRED)
+	target_sources(mumble_client_object_lib
+		PRIVATE
+			"WebSocketConnection.cpp"
+			"WebSocketConnection.h"
+	)
+	target_link_libraries(mumble_client_object_lib PUBLIC Qt6::WebSockets)
+	target_compile_definitions(mumble_client_object_lib PUBLIC "USE_WEBSOCKET")
+endif()
 
 if(WIN32 AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
 	# We don't want the console to appear in release builds.

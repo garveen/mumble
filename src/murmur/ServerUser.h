@@ -21,6 +21,10 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QStringList>
 
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocket>
+#endif
+
 #ifdef Q_OS_WIN
 #	include <winsock2.h>
 #else
@@ -154,6 +158,9 @@ public:
 	struct sockaddr_storage saiUdpAddress;
 	struct sockaddr_storage saiTcpLocalAddress;
 	ServerUser(Server *parent, QSslSocket *socket);
+#ifdef USE_WEBSOCKET
+	ServerUser(Server *parent, QWebSocket *socket);
+#endif
 };
 
 #endif

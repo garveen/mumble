@@ -42,6 +42,11 @@
 #include <QtNetwork/QHostInfo>
 #include <QtNetwork/QSslConfiguration>
 
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocket>
+#	include <QtWebSockets/QWebSocketServer>
+#endif
+
 #include "TracyConstants.h"
 #include <tracy/Tracy.hpp>
 #include <tracy/TracyC.h>
@@ -72,6 +77,12 @@ void ExecEvent::execute() {
 
 SslServer::SslServer(QObject *p) : QTcpServer(p) {
 }
+
+#ifdef USE_WEBSOCKET
+WsServer::WsServer(const QString &serverName, QWebSocketServer::SslMode secureMode, QObject *parent)
+	: QWebSocketServer(serverName, secureMode, parent) {
+}
+#endif // USE_WEBSOCKET
 
 void SslServer::incomingConnection(qintptr v) {
 	QSslSocket *s = new QSslSocket(this);
@@ -223,6 +234,39 @@ Server::Server(unsigned int snum, const ::mumble::db::ConnectionParameter &conne
 	if (!bValid)
 		return;
 
+#ifdef USE_WEBSOCKET
+	// Start WebSocket listeners if a WebSocket port is configured.
+	if (usWebSocketPort > 0) {
+		for (const QHostAddress &qha : qlBind) {
+			QWebSocketServer::SslMode secureMode = Meta::mp->qskKey.isNull()
+													   ? QWebSocketServer::NonSecureMode
+													   : QWebSocketServer::SecureMode;
+			WsServer *wss = new WsServer(QLatin1String("Mumble"), secureMode, this);
+
+			if (secureMode == QWebSocketServer::SecureMode) {
+				QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
+				sslConfig.setPrivateKey(qskKey);
+				sslConfig.setLocalCertificate(qscCert);
+				sslConfig.addCaCertificate(qscCert);
+				sslConfig.addCaCertificates(Meta::mp->qlCA);
+				sslConfig.addCaCertificates(qlIntermediates);
+				sslConfig.setCiphers(Meta::mp->qlCiphers);
+				wss->setSslConfiguration(sslConfig);
+			}
+
+			connect(wss, &QWebSocketServer::newConnection, this, &Server::newWsClient, Qt::QueuedConnection);
+
+			if (!wss->listen(qha, usWebSocketPort)) {
+				log(QString("Server: WebSocket Listen on %1 failed: %2")
+						.arg(addressToString(qha, usWebSocketPort), wss->errorString()));
+			} else {
+				log(QString("Server WebSocket listening on %1").arg(addressToString(qha, usWebSocketPort)));
+			}
+			qlWsServer << wss;
+		}
+	}
+#endif // USE_WEBSOCKET
+
 #ifdef Q_OS_UNIX
 	if (socketpair(AF_UNIX, SOCK_STREAM, 0, aiNotify) != 0) {
 		log("Failed to create notify socket");
@@ -338,6 +382,9 @@ Server::~Server() {
 void Server::readParams() {
 	qsPassword                         = Meta::mp->qsPassword;
 	usPort                             = static_cast< unsigned short >(Meta::mp->usPort + iServerNum);
+#ifdef USE_WEBSOCKET
+	usWebSocketPort                    = Meta::mp->usWebSocketPort;
+#endif
 	iTimeout                           = Meta::mp->iTimeout;
 	iMaxBandwidth                      = Meta::mp->iMaxBandwidth;
 	iMaxUsers                          = Meta::mp->iMaxUsers;
@@ -409,6 +456,9 @@ void Server::readParams() {
 
 	m_dbWrapper.getConfigurationTo(iServerNum, "password", qsPassword);
 	m_dbWrapper.getConfigurationTo(iServerNum, "port", usPort);
+#ifdef USE_WEBSOCKET
+	m_dbWrapper.getConfigurationTo(iServerNum, "wsport", usWebSocketPort);
+#endif
 	m_dbWrapper.getConfigurationTo(iServerNum, "timeout", iTimeout);
 	m_dbWrapper.getConfigurationTo(iServerNum, "bandwidth", iMaxBandwidth);
 	m_dbWrapper.getConfigurationTo(iServerNum, "users", iMaxUsers);
@@ -1497,6 +1547,81 @@ void Server::newClient() {
 		meta->successfulConnectionFrom(adr);
 	}
 }
+
+#ifdef USE_WEBSOCKET
+void Server::newWsClient() {
+	WsServer *wss = qobject_cast< WsServer * >(sender());
+	if (!wss)
+		return;
+
+	while (wss->hasPendingConnections()) {
+		QWebSocket *sock = wss->nextPendingConnection();
+		if (!sock)
+			return;
+
+		QHostAddress adr = sock->peerAddress();
+
+		if (meta->banCheck(adr)) {
+			log(QString("Ignoring WebSocket connection: %1 (Global ban)").arg(addressToString(adr, sock->peerPort())));
+			sock->close();
+			sock->deleteLater();
+			continue;
+		}
+
+		HostAddress ha(adr);
+
+		// Check server bans
+		std::size_t nBans = m_bans.size();
+		m_bans.erase(std::partition(m_bans.begin(), m_bans.end(), [](const Ban &ban) { return !ban.isExpired(); }),
+					 m_bans.end());
+		if (m_bans.size() != nBans) {
+			m_dbWrapper.saveBans(iServerNum, m_bans);
+		}
+
+		for (const Ban &ban : m_bans) {
+			if (ban.hasValidIP() && ban.haAddress.match(ha, static_cast< unsigned int >(ban.iMask))) {
+				log(QString("Ignoring WebSocket connection: %1, Reason: %2, Username: %3, Hash: %4 (Server ban)")
+						.arg(addressToString(adr, sock->peerPort()), ban.qsReason, ban.qsUsername, ban.qsHash));
+				sock->close();
+				sock->deleteLater();
+				continue;
+			}
+		}
+
+		if (qqIds.isEmpty()) {
+			log(QString("Session ID pool (%1) empty, rejecting WebSocket connection").arg(iMaxUsers));
+			sock->close();
+			sock->deleteLater();
+			continue;
+		}
+
+		ServerUser *u = new ServerUser(this, sock);
+		u->haAddress  = ha;
+		HostAddress(sock->localAddress()).toSockaddr(&u->saiTcpLocalAddress);
+
+		if (rollingStatsWindow >= 10) {
+			u->csCrypt->m_rollingStatsEnabled = true;
+			u->csCrypt->m_rollingWindow       = std::chrono::seconds(rollingStatsWindow);
+		}
+
+		connect(u, &ServerUser::connectionClosed, this, &Server::connectionClosed);
+		connect(u, SIGNAL(message(Mumble::Protocol::TCPMessageType, const QByteArray &)), this,
+				SLOT(message(Mumble::Protocol::TCPMessageType, const QByteArray &)));
+		connect(u, &ServerUser::handleSslErrors, this, &Server::sslError);
+		// WebSocket TLS handshake is handled by QWebSocketServer before we receive
+		// the connection; emit encrypted() immediately so the Mumble handshake starts.
+		connect(u, &ServerUser::encrypted, this, &Server::encrypted);
+
+		log(u, QString("New WebSocket connection: %1").arg(addressToString(adr, sock->peerPort())));
+
+		// Trigger the Mumble protocol handshake immediately – the WebSocket
+		// transport layer has already handled authentication (TLS or plain).
+		emit u->encrypted();
+
+		meta->successfulConnectionFrom(adr);
+	}
+}
+#endif // USE_WEBSOCKET
 
 void Server::encrypted() {
 	ServerUser *uSource = qobject_cast< ServerUser * >(sender());

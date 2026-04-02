@@ -40,6 +40,10 @@ public:
 
 	QList< QHostAddress > qlBind;
 	unsigned short usPort;
+#ifdef USE_WEBSOCKET
+	/// Port on which to listen for WebSocket connections (0 = disabled).
+	unsigned short usWebSocketPort;
+#endif
 	int iTimeout;
 	int iMaxBandwidth;
 	unsigned int iMaxUsers;

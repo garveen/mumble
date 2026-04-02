@@ -25,6 +25,7 @@
 #include <QtCore/QStringList>
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
+#include <QtCore/QUrl>
 #include <QtNetwork/QHostAddress>
 #include <QtNetwork/QSslCipher>
 #include <QtNetwork/QSslError>
@@ -35,6 +36,10 @@
 #include "MumbleProtocol.h"
 #include "ServerAddress.h"
 #include "Timer.h"
+
+#ifdef USE_WEBSOCKET
+#	include "WebSocketConnection.h"
+#endif
 
 #include <memory>
 
@@ -96,6 +101,12 @@ protected:
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_udpDecoder;
 	Mumble::Protocol::UDPDecoder< Mumble::Protocol::Role::Client > m_tcpTunnelDecoder;
 
+#ifdef USE_WEBSOCKET
+	bool m_useWebSocket = false;
+	QUrl m_wsUrl;
+	std::shared_ptr< WebSocketConnection > m_wsConnection;
+#endif
+
 	/// Flag indicating whether the server we are currently connected to has
 	/// finished synchronizing already.
 	bool serverSynchronized = false;
@@ -146,6 +157,9 @@ public:
 	ServerHandler();
 	~ServerHandler();
 	void setConnectionInfo(const QString &host, unsigned short port, const QString &username, const QString &pw);
+#ifdef USE_WEBSOCKET
+	void setWebSocketConnectionInfo(const QUrl &url, const QString &username, const QString &pw);
+#endif
 	void getConnectionInfo(QString &host, unsigned short &port, QString &username, QString &pw) const;
 	bool isStrong() const;
 	void customEvent(QEvent *evt) Q_DECL_OVERRIDE;

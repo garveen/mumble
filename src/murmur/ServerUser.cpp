@@ -37,6 +37,31 @@ ServerUser::ServerUser(Server *p, QSslSocket *socket)
 	bOpus = false;
 }
 
+#ifdef USE_WEBSOCKET
+ServerUser::ServerUser(Server *p, QWebSocket *socket)
+	: Connection(p, socket), ServerUserInfo(), s(nullptr), leakyBucket(p->iMessageLimit, p->iMessageBurst),
+	  m_pluginMessageBucket(p->iPluginMessageLimit, p->iPluginMessageBurst) {
+	sState       = ServerUser::Connected;
+	m_clientType = ClientType::REGULAR;
+	sUdpSocket   = INVALID_SOCKET;
+
+	memset(&saiUdpAddress, 0, sizeof(saiUdpAddress));
+	memset(&saiTcpLocalAddress, 0, sizeof(saiTcpLocalAddress));
+
+	dUDPPingAvg = dUDPPingVar = 0.0f;
+	dTCPPingAvg = dTCPPingVar = 0.0f;
+	uiUDPPackets = uiTCPPackets = 0;
+
+	// WebSocket users always use TCP tunneling; never direct UDP.
+	aiUdpFlag            = 0;
+	m_version            = Version::UNKNOWN;
+	bVerified            = true;
+	iLastPermissionCheck = -1;
+
+	bOpus = false;
+}
+#endif // USE_WEBSOCKET
+
 
 ServerUser::operator QString() const {
 	return QString::fromLatin1("%1:%2(%3)").arg(qsName).arg(uiSession).arg(iId);

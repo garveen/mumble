@@ -17,12 +17,17 @@
 #include "crypto/CryptState.h"
 #include "crypto/CryptStateOCB2.h"
 
+#include <QtCore/QByteArray>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QList>
 #include <QtCore/QMutex>
 #include <QtCore/QObject>
 #include <QtNetwork/QSslSocket>
 #include <memory>
+
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocket>
+#endif
 
 #ifdef Q_OS_WIN
 #	include <ws2tcpip.h>
@@ -40,6 +45,10 @@ private:
 	Q_DISABLE_COPY(Connection)
 protected:
 	QSslSocket *qtsSocket;
+#ifdef USE_WEBSOCKET
+	QWebSocket *qwsSocket;
+	QByteArray m_wsReadBuffer;
+#endif
 	QElapsedTimer qtLastPacket;
 	Mumble::Protocol::TCPMessageType m_type;
 	int iPacketLength;
@@ -52,6 +61,12 @@ protected slots:
 	void socketError(QAbstractSocket::SocketError);
 	void socketDisconnected();
 	void socketSslErrors(const QList< QSslError > &errors);
+#ifdef USE_WEBSOCKET
+	void wsBinaryMessageReceived(const QByteArray &message);
+	void wsError(QAbstractSocket::SocketError error);
+	void wsDisconnected();
+	void wsSslErrors(const QList< QSslError > &errors);
+#endif
 public slots:
 	void proceedAnyway();
 signals:
@@ -62,6 +77,9 @@ signals:
 
 public:
 	Connection(QObject *parent, QSslSocket *qtsSocket);
+#ifdef USE_WEBSOCKET
+	Connection(QObject *parent, QWebSocket *qwsSocket);
+#endif
 	~Connection();
 	static void messageToNetwork(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType msgType,
 								 QByteArray &cache);

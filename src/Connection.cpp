@@ -10,6 +10,10 @@
 #include <QtCore/QtEndian>
 #include <QtNetwork/QHostAddress>
 
+#ifdef USE_WEBSOCKET
+#	include <QtWebSockets/QWebSocket>
+#endif
+
 #ifdef Q_OS_WIN
 #	include <qos2.h>
 #else
@@ -25,6 +29,9 @@ HANDLE Connection::hQoS = nullptr;
 
 Connection::Connection(QObject *p, QSslSocket *qtsSock) : QObject(p) {
 	qtsSocket = qtsSock;
+#ifdef USE_WEBSOCKET
+	qwsSocket = nullptr;
+#endif
 	qtsSocket->setParent(this);
 	iPacketLength        = -1;
 	bDisconnectedEmitted = false;
@@ -53,6 +60,33 @@ Connection::Connection(QObject *p, QSslSocket *qtsSock) : QObject(p) {
 #endif
 }
 
+#ifdef USE_WEBSOCKET
+Connection::Connection(QObject *p, QWebSocket *qwsSock) : QObject(p) {
+	qtsSocket = nullptr;
+	qwsSocket = qwsSock;
+	qwsSocket->setParent(this);
+	iPacketLength        = -1;
+	bDisconnectedEmitted = false;
+	csCrypt              = std::make_unique< CryptStateOCB2 >();
+
+	static bool bDeclared = false;
+	if (!bDeclared) {
+		bDeclared = true;
+		qRegisterMetaType< QAbstractSocket::SocketError >("QAbstractSocket::SocketError");
+	}
+
+	connect(qwsSocket, &QWebSocket::binaryMessageReceived, this, &Connection::wsBinaryMessageReceived);
+	connect(qwsSocket, &QWebSocket::errorOccurred, this, &Connection::wsError);
+	connect(qwsSocket, &QWebSocket::disconnected, this, &Connection::wsDisconnected);
+	connect(qwsSocket, QOverload< const QList< QSslError > & >::of(&QWebSocket::sslErrors), this,
+			&Connection::wsSslErrors);
+	qtLastPacket.restart();
+#ifdef Q_OS_WIN
+	dwFlow = 0;
+#endif
+}
+#endif // USE_WEBSOCKET
+
 Connection::~Connection() {
 #ifdef Q_OS_WIN
 	if (dwFlow && hQoS) {
@@ -67,11 +101,23 @@ void Connection::setToS() {
 	if (dwFlow || !hQoS)
 		return;
 
+#	ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		// No raw socket descriptor available for QWebSocket; skip QoS setup.
+		return;
+	}
+#	endif
+
 	dwFlow = 0;
 	if (!QOSAddSocketToFlow(hQoS, qtsSocket->socketDescriptor(), nullptr, QOSTrafficTypeAudioVideo,
 							QOS_NON_ADAPTIVE_FLOW, reinterpret_cast< PQOS_FLOWID >(&dwFlow)))
 		qWarning("Connection: Failed to add flow to QOS");
 #elif defined(Q_OS_UNIX)
+#	ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		return;
+	}
+#	endif
 	int val = 0xa0;
 	if (setsockopt(static_cast< int >(qtsSocket->socketDescriptor()), IPPROTO_IP, IP_TOS, &val, sizeof(val))) {
 		val = 0x60;
@@ -151,12 +197,65 @@ void Connection::socketSslErrors(const QList< QSslError > &qlErr) {
 }
 
 void Connection::proceedAnyway() {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		qwsSocket->ignoreSslErrors();
+		return;
+	}
+#endif
 	qtsSocket->ignoreSslErrors();
 }
 
 void Connection::socketDisconnected() {
 	emit connectionClosed(QAbstractSocket::UnknownSocketError, QString());
 }
+
+#ifdef USE_WEBSOCKET
+void Connection::wsBinaryMessageReceived(const QByteArray &message) {
+	// Append to read buffer and parse framed Mumble packets.
+	// Each WebSocket message may carry one or more protocol frames.
+	m_wsReadBuffer.append(message);
+
+	while (true) {
+		if (m_wsReadBuffer.size() < 6)
+			return;
+
+		const unsigned char *hdr = reinterpret_cast< const unsigned char * >(m_wsReadBuffer.constData());
+		if (iPacketLength == -1) {
+			m_type        = static_cast< Mumble::Protocol::TCPMessageType >(qFromBigEndian< quint16 >(hdr));
+			iPacketLength = qFromBigEndian< qint32 >(hdr + 2);
+		}
+
+		if (iPacketLength > 0x7fffff) {
+			qWarning("Connection(WS): host tried to send huge packet (%d bytes)", iPacketLength);
+			disconnectSocket(true);
+			return;
+		}
+
+		if (m_wsReadBuffer.size() < 6 + iPacketLength)
+			return;
+
+		QByteArray payload = m_wsReadBuffer.mid(6, iPacketLength);
+		m_wsReadBuffer.remove(0, 6 + iPacketLength);
+		iPacketLength = -1;
+
+		qtLastPacket.restart();
+		emit message(m_type, payload);
+	}
+}
+
+void Connection::wsError(QAbstractSocket::SocketError error) {
+	emit connectionClosed(error, qwsSocket->errorString());
+}
+
+void Connection::wsDisconnected() {
+	emit connectionClosed(QAbstractSocket::UnknownSocketError, QString());
+}
+
+void Connection::wsSslErrors(const QList< QSslError > &errors) {
+	emit handleSslErrors(errors);
+}
+#endif // USE_WEBSOCKET
 
 void Connection::messageToNetwork(const ::google::protobuf::Message &msg, Mumble::Protocol::TCPMessageType msgType,
 								  QByteArray &cache) {
@@ -186,11 +285,24 @@ void Connection::sendMessage(const ::google::protobuf::Message &msg, Mumble::Pro
 }
 
 void Connection::sendMessage(const QByteArray &qbaMsg) {
-	if (!qbaMsg.isEmpty())
-		qtsSocket->write(qbaMsg);
+	if (qbaMsg.isEmpty())
+		return;
+#ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		qwsSocket->sendBinaryMessage(qbaMsg);
+		return;
+	}
+#endif
+	qtsSocket->write(qbaMsg);
 }
 
 void Connection::forceFlush() {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		qwsSocket->flush();
+		return;
+	}
+#endif
 	if (qtsSocket->state() != QAbstractSocket::ConnectedState)
 		return;
 
@@ -201,6 +313,16 @@ void Connection::forceFlush() {
 }
 
 void Connection::disconnectSocket(bool force) {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket) {
+		if (force) {
+			qwsSocket->abort();
+		} else {
+			qwsSocket->close();
+		}
+		return;
+	}
+#endif
 	if (qtsSocket->state() == QAbstractSocket::UnconnectedState) {
 		emit connectionClosed(QAbstractSocket::UnknownSocketError, QString());
 		return;
@@ -213,22 +335,42 @@ void Connection::disconnectSocket(bool force) {
 }
 
 QHostAddress Connection::peerAddress() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->peerAddress();
+#endif
 	return qtsSocket->peerAddress();
 }
 
 quint16 Connection::peerPort() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->peerPort();
+#endif
 	return qtsSocket->peerPort();
 }
 
 QHostAddress Connection::localAddress() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->localAddress();
+#endif
 	return qtsSocket->localAddress();
 }
 
 quint16 Connection::localPort() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->localPort();
+#endif
 	return qtsSocket->localPort();
 }
 
 QList< QSslCertificate > Connection::peerCertificateChain() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->sslConfiguration().peerCertificateChain();
+#endif
 	// The documentation of QSslSocket::peerCertificateChain() actually says nothing
 	// about the order of the certificates in the chain. The sentence in this functions
 	// documentation is taken from QSslConfiguration::peerCertificateChain().
@@ -239,10 +381,18 @@ QList< QSslCertificate > Connection::peerCertificateChain() const {
 }
 
 QSslCipher Connection::sessionCipher() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->sslConfiguration().sessionCipher();
+#endif
 	return qtsSocket->sessionCipher();
 }
 
 QSsl::SslProtocol Connection::sessionProtocol() const {
+#ifdef USE_WEBSOCKET
+	if (qwsSocket)
+		return qwsSocket->sslConfiguration().sessionProtocol();
+#endif
 	return qtsSocket->sessionProtocol();
 }
 

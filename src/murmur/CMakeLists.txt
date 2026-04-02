@@ -15,6 +15,7 @@ set(ICE_FILE "${CMAKE_CURRENT_SOURCE_DIR}/MumbleServer.ice")
 include(qt-utils)
 
 option(ice "Build support for Ice RPC." ON)
+option(websocket "Build WebSocket support." ON)
 
 find_pkg(Qt6 COMPONENTS Sql REQUIRED)
 
@@ -91,6 +92,12 @@ target_include_directories(mumble_server_object_lib
 )
 
 target_link_libraries(mumble_server_object_lib PUBLIC shared Qt6::Sql)
+
+if(websocket)
+	find_pkg(Qt6 COMPONENTS WebSockets REQUIRED)
+	target_link_libraries(mumble_server_object_lib PUBLIC Qt6::WebSockets)
+	target_compile_definitions(mumble_server_object_lib PUBLIC "USE_WEBSOCKET")
+endif()
 
 if(static)
 	# MariaDB and MySQL

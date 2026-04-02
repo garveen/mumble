@@ -133,6 +133,9 @@ public:
 	QString qsUsername;
 	QString qsPassword;
 
+	/// URL scheme: "mumble" (default), "ws", or "wss".
+	QString qsScheme;
+
 	QString qsCountry;
 	QString qsCountryCode;
 	QString qsContinentCode;
@@ -355,6 +358,8 @@ public slots:
 
 public:
 	QString qsServer, qsUsername, qsPassword;
+	/// URL scheme: "mumble", "ws", or "wss". Defaults to "mumble".
+	QString qsScheme;
 	unsigned short usPort;
 	ConnectDialog(QWidget *parent, bool autoconnect);
 	~ConnectDialog();
